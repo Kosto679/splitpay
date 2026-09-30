@@ -1,0 +1,20 @@
+services:
+  splitpay:
+    build: .
+    container_name: splitpay
+    ports:
+      - "9000:9000"
+    env_file: .env
+    environment:
+      DATA_DIR: /data
+      TZ: ${TZ:-Europe/Athens}
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9000/api/health"]
+      interval: 5m
+      timeout: 5s
+      start_period: 60s
+      retries: 3
