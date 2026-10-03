@@ -213,6 +213,14 @@ public class PeopleController {
         return Map.of("ok", true, "sent_count", count);
     }
 
+    @PostMapping("/run-auto-reminders")
+    NotificationService.AutomatedAlertResult runAutoReminders() {
+        if (!notifications.isConfigured()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Email notifications are not configured");
+        }
+        return notifications.runAutomatedOverdueJob();
+    }
+
     private String generateUnique(Person person) {
         for (int attempt = 0; attempt < 20; attempt++) {
             String candidate = pins.generate();

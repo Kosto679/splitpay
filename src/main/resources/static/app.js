@@ -268,7 +268,10 @@ function peopleView() {
         </div>
         ${
           state.session?.email_configured
-            ? `<button class="ghost" type="button" id="remind-all-btn">Send overdue reminders</button>`
+            ? `<div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <button class="ghost" type="button" id="remind-all-btn">Send overdue reminders</button>
+                <button class="ghost" type="button" id="run-auto-job-btn" title="Run the automated alerts job (reminders + admin digest)">Run automated alert job</button>
+               </div>`
             : ""
         }
       </div>
@@ -740,6 +743,14 @@ async function handleClick(target) {
     const res = await api("/api/people/remind-all", { method: "POST" });
     const count = res.sent_count ?? 0;
     state.notice = `Sent reminders to ${count} ${count === 1 ? "person" : "people"}.`;
+    return true;
+  }
+  if (target.id === "run-auto-job-btn") {
+    const res = await api("/api/people/run-auto-reminders", { method: "POST" });
+    const reminders = res.reminders_sent ?? res.remindersSent ?? 0;
+    const overdue = res.overdue_members_count ?? res.overdueMembersCount ?? 0;
+    const admin = res.admin_notified ?? res.adminNotified;
+    state.notice = `Automated alerts job finished: ${overdue} overdue member(s), ${reminders} reminder(s) sent, admin digest ${admin ? "sent" : "skipped"}.`;
     return true;
   }
   return false;

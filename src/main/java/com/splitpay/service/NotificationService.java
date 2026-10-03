@@ -6,6 +6,7 @@ import java.math.BigDecimal;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -18,6 +19,8 @@ import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.mail.MailException;
 import org.springframework.mail.javamail.JavaMailSender;
@@ -43,6 +46,7 @@ public class NotificationService {
     private static final String REMINDER_TEMPLATE_PATH = "templates/email/payment-reminder.html";
     private static final String PASSWORD_RESET_TEMPLATE_PATH = "templates/email/password-reset.html";
     private static final String CHECK_IN_PASSWORD_TEMPLATE_PATH = "templates/email/check-in-password.html";
+    private static final String ADMIN_SUMMARY_TEMPLATE_PATH = "templates/email/admin-overdue-summary.html";
 
     private final Optional<JavaMailSender> mailer;
     private final SplitpayProperties props;
@@ -50,6 +54,9 @@ public class NotificationService {
     private final PersonRepository people;
     private final MembershipRepository memberships;
     private final Clock clock;
+    private final int cooldownDays;
+    private final boolean notifyAdmin;
+    private final String adminEmail;
 
     public NotificationService(
             ObjectProvider<JavaMailSender> mailerProvider,
@@ -58,12 +65,29 @@ public class NotificationService {
             PersonRepository people,
             MembershipRepository memberships,
             Clock clock) {
+        this(mailerProvider, props, ledger, people, memberships, clock, 3, true, "");
+    }
+
+    @Autowired
+    public NotificationService(
+            ObjectProvider<JavaMailSender> mailerProvider,
+            SplitpayProperties props,
+            LedgerService ledger,
+            PersonRepository people,
+            MembershipRepository memberships,
+            Clock clock,
+            @Value("${splitpay.auto-reminders.cooldown-days:3}") int cooldownDays,
+            @Value("${splitpay.auto-reminders.notify-admin:true}") boolean notifyAdmin,
+            @Value("${splitpay.auto-reminders.admin-email:}") String adminEmail) {
         this.mailer = Optional.ofNullable(mailerProvider.getIfAvailable());
         this.props = props;
         this.ledger = ledger;
         this.people = people;
         this.memberships = memberships;
         this.clock = clock;
+        this.cooldownDays = cooldownDays;
+        this.notifyAdmin = notifyAdmin;
+        this.adminEmail = adminEmail != null ? adminEmail.trim() : "";
     }
 
     public boolean isConfigured() {
@@ -181,11 +205,11 @@ public class NotificationService {
 
         LocalDateTime now = LocalDateTime.now(clock);
         if (!force) {
-            LocalDateTime threshold = now.minusDays(3);
+            LocalDateTime threshold = now.minusDays(cooldownDays);
             boolean allRecent = unpaid.stream()
                     .allMatch(m -> m.getEmailReminderSentAt() != null && m.getEmailReminderSentAt().isAfter(threshold));
             if (allRecent) {
-                log.info("Skipping reminder for {} - all unpaid subscriptions reminded within last 3 days", person.getName());
+                log.info("Skipping reminder for {} - all unpaid subscriptions reminded within last {} days", person.getName(), cooldownDays);
                 return false;
             }
         }
@@ -266,6 +290,159 @@ public class NotificationService {
             }
         }
         return sent;
+    }
+
+    public record AutomatedAlertResult(
+            int overdueMembersCount,
+            int remindersSent,
+            boolean adminNotified,
+            String totalOutstanding
+    ) {}
+
+    public AutomatedAlertResult runAutomatedOverdueJob() {
+        if (!isConfigured()) {
+            log.info("Email is not configured; skipping automated overdue alerts job");
+            return new AutomatedAlertResult(0, 0, false, "0.00");
+        }
+
+        List<Person> allPeople = people.findAllByOrderByNameAsc();
+        List<Person> overduePeople = new ArrayList<>();
+        Map<Long, List<Membership>> unpaidByPerson = new LinkedHashMap<>();
+        Map<String, BigDecimal> globalTotalsByCurrency = new LinkedHashMap<>();
+
+        for (Person p : allPeople) {
+            List<Membership> memberList = memberships.findByPersonId(p.getId());
+            List<Membership> unpaid = new ArrayList<>();
+            for (Membership m : memberList) {
+                if (m.isOwner()) {
+                    continue;
+                }
+                MemberStatus status = ledger.status(m);
+                if (!status.paid()) {
+                    unpaid.add(m);
+                    globalTotalsByCurrency.merge(m.getSubscription().getCurrency(), status.remainingAmount(), BigDecimal::add);
+                }
+            }
+            if (!unpaid.isEmpty()) {
+                overduePeople.add(p);
+                unpaidByPerson.put(p.getId(), unpaid);
+            }
+        }
+
+        int overdueCount = overduePeople.size();
+        String totalOutstandingStr = formatTotals(globalTotalsByCurrency);
+
+        int remindersSent = 0;
+        for (Person p : overduePeople) {
+            if (p.getEmail() != null && !p.getEmail().isBlank()) {
+                try {
+                    if (sendPaymentReminder(p, false)) {
+                        remindersSent++;
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to send automated reminder to {}: {}", p.getName(), e.getMessage());
+                }
+            }
+        }
+
+        boolean adminSent = false;
+        if (notifyAdmin && overdueCount > 0) {
+            String adminTo = resolveAdminRecipient();
+            if (adminTo != null && !adminTo.isBlank()) {
+                adminSent = sendAdminSummaryAlert(adminTo, overduePeople, unpaidByPerson, overdueCount, remindersSent, totalOutstandingStr);
+            } else {
+                log.info("No admin recipient email resolved; skipping admin overdue summary alert");
+            }
+        }
+
+        return new AutomatedAlertResult(overdueCount, remindersSent, adminSent, totalOutstandingStr);
+    }
+
+    private String resolveAdminRecipient() {
+        if (adminEmail != null && !adminEmail.isBlank()) {
+            return adminEmail;
+        }
+        if (props.supportEmail() != null && !props.supportEmail().isBlank()) {
+            return props.supportEmail();
+        }
+        if (props.mailFrom() != null && !props.mailFrom().isBlank()) {
+            return props.mailFrom();
+        }
+        return null;
+    }
+
+    private boolean sendAdminSummaryAlert(
+            String to,
+            List<Person> overduePeople,
+            Map<Long, List<Membership>> unpaidByPerson,
+            int overdueCount,
+            int remindersSent,
+            String totalOutstandingStr) {
+
+        String template = loadTemplate(ADMIN_SUMMARY_TEMPLATE_PATH);
+
+        StringBuilder membersTable = new StringBuilder();
+        for (Person p : overduePeople) {
+            List<Membership> unpaid = unpaidByPerson.getOrDefault(p.getId(), List.of());
+            Map<String, BigDecimal> personTotals = new LinkedHashMap<>();
+            List<String> subDetails = new ArrayList<>();
+
+            for (Membership m : unpaid) {
+                MemberStatus s = ledger.status(m);
+                String subName = escapeHtml(m.getSubscription().getName());
+                String badge = s.overdue() ? "<span style=\"color: #b91c1c; font-weight: 600;\">Overdue</span>" : "Due";
+                subDetails.add(subName + " (" + badge + ")");
+                personTotals.merge(m.getSubscription().getCurrency(), s.remainingAmount(), BigDecimal::add);
+            }
+
+            String personTotalFormatted = formatTotals(personTotals);
+            String emailDisplay = (p.getEmail() != null && !p.getEmail().isBlank())
+                    ? escapeHtml(p.getEmail())
+                    : "<span style=\"color: #999; font-style: italic;\">No email</span>";
+
+            membersTable.append("<tr>")
+                    .append("<td>")
+                    .append("<div class=\"member-name\">").append(escapeHtml(p.getName())).append("</div>")
+                    .append("<div class=\"member-detail\">").append(emailDisplay).append("</div>")
+                    .append("</td>")
+                    .append("<td>")
+                    .append(String.join("<br>", subDetails))
+                    .append("</td>")
+                    .append("<td class=\"amount\">").append(personTotalFormatted).append("</td>")
+                    .append("</tr>\n");
+        }
+
+        String generatedAt = LocalDateTime.now(clock)
+                .format(DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm")) + " (" + props.timezone() + ")";
+
+        String adminUrl = props.publicUrl();
+        if (adminUrl == null || adminUrl.isBlank()) {
+            adminUrl = "/";
+        }
+
+        String html = template
+                .replace("{{overdueCount}}", String.valueOf(overdueCount))
+                .replace("{{plural}}", overdueCount == 1 ? "" : "s")
+                .replace("{{totalOutstanding}}", totalOutstandingStr)
+                .replace("{{remindersSent}}", String.valueOf(remindersSent))
+                .replace("{{reminderPlural}}", remindersSent == 1 ? "" : "s")
+                .replace("{{membersTable}}", membersTable.toString())
+                .replace("{{adminUrl}}", adminUrl)
+                .replace("{{generatedAt}}", generatedAt);
+
+        String subject = "Splitpay Alert: " + overdueCount + " member" + (overdueCount == 1 ? "" : "s")
+                + " with overdue payments (" + totalOutstandingStr + ")";
+
+        return sendHtml(to, subject, html);
+    }
+
+    private String formatTotals(Map<String, BigDecimal> totals) {
+        if (totals.isEmpty()) {
+            return "0.00";
+        }
+        return totals.entrySet().stream()
+                .map(e -> String.format(Locale.US, "%.2f %s", e.getValue(), e.getKey()))
+                .collect(Collectors.joining(", "));
     }
 
     private String loadTemplate(String path) {

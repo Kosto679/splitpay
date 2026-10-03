@@ -278,4 +278,41 @@ class NotificationServiceTest {
         assertThat(sentCount).isEqualTo(2);
         verify(mailer, times(2)).send(any(MimeMessage.class));
     }
+
+    @Test
+    void runAutomatedOverdueJobSendsRemindersAndAdminSummary() throws Exception {
+        Person maria = new Person();
+        maria.setName("Maria");
+        maria.setEmail("maria@example.com");
+        maria.setCreatedAt(ledger.now().minusMonths(1));
+        maria = people.save(maria);
+
+        Subscription sub = new Subscription();
+        sub.setName("Netflix");
+        sub.setTotalAmount(new BigDecimal("12.00"));
+        sub.setBillingDay(1);
+        sub = subscriptions.save(sub);
+
+        Membership m1 = new Membership();
+        m1.setPerson(maria);
+        m1.setSubscription(sub);
+        m1.setShareAmount(new BigDecimal("6.00"));
+        m1.setCreatedAt(ledger.now().minusMonths(1));
+        memberships.save(m1);
+
+        NotificationService.AutomatedAlertResult result = notifications.runAutomatedOverdueJob();
+        assertThat(result.overdueMembersCount()).isEqualTo(1);
+        assertThat(result.remindersSent()).isEqualTo(1);
+        assertThat(result.adminNotified()).isTrue();
+        assertThat(result.totalOutstanding()).contains("EUR");
+
+        // 1 to Maria + 1 admin digest = 2 messages
+        verify(mailer, times(2)).send(any(MimeMessage.class));
+
+        // Running again immediately respects cooldown: member reminder skipped, so 0 sent
+        NotificationService.AutomatedAlertResult secondRun = notifications.runAutomatedOverdueJob();
+        assertThat(secondRun.overdueMembersCount()).isEqualTo(1);
+        assertThat(secondRun.remindersSent()).isEqualTo(0);
+    }
 }
+
