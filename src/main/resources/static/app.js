@@ -102,7 +102,14 @@ function subCard(sub) {
       </div>
       <div class="progress"><span style="width:${pct}%"></span></div>
       <div class="people">
-        ${(sub.members || []).map((m) => `<span class="chip ${m.owner ? "owner" : m.paid ? "paid" : "due"}">${escapeHtml(m.name)}${m.owner ? " · owner" : ""}</span>`).join("") || `<span class="muted">No people yet</span>`}
+        ${(sub.members || []).map((m) => {
+          let extra = "";
+          if (m.owner) extra = " · owner";
+          else if (!m.paid && m.remaining_amount != null && Number(m.remaining_amount) < Number(m.share_amount)) {
+            extra = ` · ${money(m.remaining_amount, sub.currency)} due`;
+          }
+          return `<span class="chip ${m.owner ? "owner" : m.paid ? "paid" : "due"}">${escapeHtml(m.name)}${extra}</span>`;
+        }).join("") || `<span class="muted">No people yet</span>`}
       </div>
     </article>
   `;
@@ -215,6 +222,8 @@ function detailView() {
         </label>
         <label>New person's name <input name="name" placeholder="Only if they're not in the list" /></label>
         <label>Share amount <input name="share_amount" type="number" step="0.01" min="0.01" required /></label>
+        <label>Starting month <input name="first_period" type="month" /></label>
+        <p class="muted">Leave blank for current month, or pick an earlier month if they already owe for past months.</p>
         <label class="checkbox"><input type="checkbox" name="owner" /> Owner: holds the subscription and pays the provider, so always counted as paid</label>
         <button class="primary" type="submit">Add to plan</button>
       </form>
@@ -252,11 +261,21 @@ function peopleView() {
     "people",
     `
     <section class="panel">
-      <h2>People</h2>
-      <p class="muted">Everyone who pays you, across all plans. Give someone an easy password and they can check their status at <span class="mono">${escapeHtml(origin)}/check</span>.</p>
+      <div class="row" style="justify-content: space-between; align-items: flex-start; margin-bottom: 12px;">
+        <div>
+          <h2>People</h2>
+          <p class="muted">Everyone who pays you, across all plans. Give someone an easy password and they can check their status at <span class="mono">${escapeHtml(origin)}/check</span>.</p>
+        </div>
+        ${
+          state.session?.email_configured
+            ? `<button class="ghost" type="button" id="remind-all-btn">Send overdue reminders</button>`
+            : ""
+        }
+      </div>
       <form id="new-person">
         <div class="row">
           <label>Name <input name="name" required placeholder="Maria" /></label>
+          <label>Email <input name="email" type="email" placeholder="maria@example.com" /></label>
           <label>Bank aliases <input name="aliases" placeholder="MARIA PAPA, ΜΑΡΙΑ ΠΑΠΑ" /></label>
         </div>
         <button class="primary" type="submit">Add person</button>
@@ -268,12 +287,14 @@ function peopleView() {
 }
 
 function personCard(p) {
+  const hasUnpaid = (p.memberships || []).some((m) => !m.paid && !m.owner);
   return `
     <article class="panel">
       <div class="row">
         <h3>${escapeHtml(p.name)}</h3>
         <span class="chip ${p.has_pin ? "paid" : ""}">${p.has_pin ? "Check-in on" : "No check-in"}</span>
       </div>
+      ${p.email ? `<p class="muted">Email: <a href="mailto:${escapeHtml(p.email)}">${escapeHtml(p.email)}</a></p>` : ""}
       ${p.aliases ? `<p class="muted">Aliases: ${escapeHtml(p.aliases)}</p>` : ""}
       ${
         p.memberships.length
@@ -293,14 +314,50 @@ function personCard(p) {
               .join("")
           : `<p class="muted">Not on any plan yet. Add them from a subscription.</p>`
       }
+      ${
+        p.email && state.session?.email_configured
+          ? `<div class="actions" style="margin-top: 12px;">
+              ${
+                hasUnpaid
+                  ? `<button class="ghost" type="button" data-remind-person="${p.id}">Send payment reminder</button>`
+                  : ""
+              }
+              ${
+                p.has_pin
+                  ? `<button class="ghost" type="button" data-reset-email-pin="${p.id}">Reset & email password</button>`
+                  : `<button class="ghost" type="button" data-create-email-pin="${p.id}">Set & email check-in</button>`
+              }
+              <button class="ghost" type="button" data-welcome-person="${p.id}">Send welcome email</button>
+            </div>`
+          : ""
+      }
       <details ${state.pinResult?.personId === p.id ? "open" : ""}>
         <summary>Check-in password</summary>
         <form class="pin-form" data-person="${p.id}">
           <label>Easy password <input name="pin" minlength="4" autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="Leave blank to generate one" /></label>
           <p class="muted">At least 4 characters, not case sensitive, and different for each person.</p>
           ${
+            p.email && state.session?.email_configured
+              ? `<label style="display: flex; align-items: center; gap: 8px; margin: 8px 0; font-size: 14px; cursor: pointer;">
+                  <input type="checkbox" name="send_email" value="true" checked />
+                  Email ${p.has_pin ? "new" : ""} password to ${escapeHtml(p.name)} (${escapeHtml(p.email)})
+                </label>`
+              : ""
+          }
+          ${
             state.pinResult?.personId === p.id
-              ? `<p class="notice ok">Saved. ${escapeHtml(p.name)}'s check-in password is <strong class="mono">${escapeHtml(state.pinResult.pin)}</strong>. Share it now; it won't be shown again.</p>`
+              ? `<div class="notice ok" style="margin: 12px 0;">
+                  <p style="margin: 0 0 6px 0;">Saved. ${escapeHtml(p.name)}'s check-in password is <strong class="mono">${escapeHtml(state.pinResult.pin)}</strong>.${
+                    state.pinResult.emailSent
+                      ? ` Emailed to <strong>${escapeHtml(p.email)}</strong>.`
+                      : " Share it now; it won't be shown again."
+                  }</p>
+                  ${
+                    !state.pinResult.emailSent && p.email && state.session?.email_configured
+                      ? `<button class="ghost" type="button" data-send-pin-email="${p.id}" data-pin="${escapeHtml(state.pinResult.pin)}">Email password to ${escapeHtml(p.name)}</button>`
+                      : ""
+                  }
+                </div>`
               : ""
           }
           <div class="actions">
@@ -314,6 +371,7 @@ function personCard(p) {
         <form class="person-form" data-person="${p.id}">
           <div class="row">
             <label>Name <input name="name" value="${escapeHtml(p.name)}" required /></label>
+            <label>Email <input name="email" type="email" value="${escapeHtml(p.email || "")}" placeholder="name@example.com" /></label>
             <label>Bank aliases <input name="aliases" value="${escapeHtml(p.aliases)}" /></label>
           </div>
           <div class="actions">
@@ -514,6 +572,7 @@ async function handleSubmit(form) {
         name: data.name,
         share_amount: Number(data.share_amount),
         owner: data.owner === "on",
+        first_period: data.first_period || null,
       },
     });
     state.notice = "Person added.";
@@ -552,8 +611,14 @@ async function handleSubmit(form) {
     return;
   }
   if (form.classList.contains("pin-form")) {
-    const { pin } = await api(`/api/people/${form.dataset.person}/pin`, { method: "POST", body: formData(form) });
-    state.pinResult = { personId: Number(form.dataset.person), pin };
+    const data = formData(form);
+    const body = {
+      pin: data.pin,
+      send_email: form.send_email ? form.send_email.checked : false,
+    };
+    const res = await api(`/api/people/${form.dataset.person}/pin`, { method: "POST", body });
+    state.pinResult = { personId: Number(form.dataset.person), pin: res.pin, emailSent: res.email_sent };
+    state.notice = res.email_sent ? "Password saved and emailed to member." : "Password saved.";
     return;
   }
   if (form.id === "capture-form") {
@@ -627,6 +692,55 @@ async function handleClick(target) {
     await api(`/api/subscriptions/${state.detail.id}`, { method: "DELETE" });
     location.hash = "#/";
     return false;
+  }
+  const remind = target.closest("[data-remind-person]");
+  if (remind) {
+    await api(`/api/people/${remind.dataset.remindPerson}/remind`, { method: "POST" });
+    state.notice = "Payment reminder email sent.";
+    return true;
+  }
+  const welcome = target.closest("[data-welcome-person]");
+  if (welcome) {
+    await api(`/api/people/${welcome.dataset.welcomePerson}/welcome`, { method: "POST" });
+    state.notice = "Welcome email sent.";
+    return true;
+  }
+  const resetEmail = target.closest("[data-reset-email-pin]");
+  if (resetEmail) {
+    const personId = resetEmail.dataset.resetEmailPin;
+    const person = (state.people || []).find((p) => String(p.id) === String(personId));
+    if (!confirm(`Reset check-in password for ${person ? person.name : "this person"} and email the new password?`)) return false;
+    const res = await api(`/api/people/${personId}/reset-password`, { method: "POST" });
+    state.pinResult = { personId: Number(personId), pin: res.pin, emailSent: res.email_sent };
+    state.notice = res.email_sent ? "Password reset and emailed to member." : "Password reset.";
+    return true;
+  }
+  const createEmail = target.closest("[data-create-email-pin]");
+  if (createEmail) {
+    const personId = createEmail.dataset.createEmailPin;
+    const person = (state.people || []).find((p) => String(p.id) === String(personId));
+    if (!confirm(`Create check-in password for ${person ? person.name : "this person"} and email it?`)) return false;
+    const res = await api(`/api/people/${personId}/create-pin`, { method: "POST" });
+    state.pinResult = { personId: Number(personId), pin: res.pin, emailSent: res.email_sent };
+    state.notice = res.email_sent ? "Check-in password created and emailed to member." : "Check-in password created.";
+    return true;
+  }
+  const sendPinEmail = target.closest("[data-send-pin-email]");
+  if (sendPinEmail) {
+    const personId = sendPinEmail.dataset.sendPinEmail;
+    const pin = sendPinEmail.dataset.pin;
+    await api(`/api/people/${personId}/send-pin-email`, { method: "POST", body: { pin } });
+    if (state.pinResult && String(state.pinResult.personId) === String(personId)) {
+      state.pinResult.emailSent = true;
+    }
+    state.notice = "Password emailed to member.";
+    return true;
+  }
+  if (target.id === "remind-all-btn") {
+    const res = await api("/api/people/remind-all", { method: "POST" });
+    const count = res.sent_count ?? 0;
+    state.notice = `Sent reminders to ${count} ${count === 1 ? "person" : "people"}.`;
+    return true;
   }
   return false;
 }

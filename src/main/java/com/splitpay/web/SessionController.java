@@ -29,11 +29,14 @@ public class SessionController {
     private final SplitpayProperties properties;
     private final AdminAuth adminAuth;
     private final AttemptLimiter limiter;
+    private final com.splitpay.service.NotificationService notificationService;
 
-    public SessionController(SplitpayProperties properties, AdminAuth adminAuth, AttemptLimiter limiter) {
+    public SessionController(SplitpayProperties properties, AdminAuth adminAuth, AttemptLimiter limiter,
+            com.splitpay.service.NotificationService notificationService) {
         this.properties = properties;
         this.adminAuth = adminAuth;
         this.limiter = limiter;
+        this.notificationService = notificationService;
     }
 
     @GetMapping("/health")
@@ -44,7 +47,7 @@ public class SessionController {
     @GetMapping("/session")
     SessionOut session(HttpServletRequest request) {
         return new SessionOut(adminAuth.isAdmin(request), properties.authRequired(),
-                !properties.ingestToken().isEmpty(), properties.publicUrl());
+                !properties.ingestToken().isEmpty(), properties.publicUrl(), notificationService.isConfigured());
     }
 
     @PostMapping("/login")

@@ -61,9 +61,17 @@ async function onSubmit(event) {
 
 function publicStatusText(s) {
   if (s.owner) return "You hold this subscription, so your share is always covered.";
-  if (s.overdue) return `Payment overdue since ${fmtDate(s.next_billing_date)}.`;
-  if (!s.paid) return `Payment due since ${fmtDate(s.next_billing_date)}.`;
-  return `Paid through ${fmtDate(s.paid_through)}. Next payment due ${fmtDate(s.next_billing_date)}.`;
+  const dueDetails = s.remaining_amount != null
+    ? (s.months_due > 1
+        ? ` (${s.months_due} months, ${money(s.remaining_amount, s.currency)} still due)`
+        : ` (${money(s.remaining_amount, s.currency)} still due)`)
+    : (s.months_due > 1 ? ` (${s.months_due} months still due)` : "");
+  if (s.overdue) return `Payment overdue since ${fmtDate(s.next_billing_date)}${dueDetails}.`;
+  if (!s.paid) return `Payment due since ${fmtDate(s.next_billing_date)}${dueDetails}.`;
+  const nextRem = s.remaining_amount != null && Number(s.remaining_amount) < Number(s.share_amount)
+    ? ` (${money(s.remaining_amount, s.currency)} due)`
+    : "";
+  return `Paid through ${fmtDate(s.paid_through)}. Next payment due ${fmtDate(s.next_billing_date)}${nextRem}.`;
 }
 
 function drawResult(result) {

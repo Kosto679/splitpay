@@ -29,7 +29,7 @@ public final class Api {
     }
 
     public record MemberIn(Long personId, String name, @NotNull @DecimalMin("0.01") BigDecimal shareAmount,
-            Boolean owner) {
+            Boolean owner, String firstPeriod) {
     }
 
     public record OwnerIn(boolean owner) {
@@ -38,10 +38,13 @@ public final class Api {
     public record ShareIn(@NotNull @DecimalMin("0.01") BigDecimal shareAmount) {
     }
 
-    public record PersonIn(@NotBlank String name, String aliases) {
+    public record PersonIn(@NotBlank String name, String aliases, String email) {
     }
 
-    public record PinIn(String pin) {
+    public record PinIn(String pin, Boolean sendEmail) {
+        public PinIn(String pin) {
+            this(pin, null);
+        }
     }
 
     public record PaymentIn(
@@ -66,8 +69,18 @@ public final class Api {
 
     // ---- responses ----------------------------------------------------------------------
 
-    public record SessionOut(boolean authed, boolean authRequired, boolean ingestConfigured, String publicUrl) {
+    public record SessionOut(
+            boolean authed,
+            boolean authRequired,
+            boolean ingestConfigured,
+            String publicUrl,
+            boolean emailConfigured) {
+
+        public SessionOut(boolean authed, boolean authRequired, boolean ingestConfigured, String publicUrl) {
+            this(authed, authRequired, ingestConfigured, publicUrl, false);
+        }
     }
+
 
     public record MemberOut(
             Long id,
@@ -75,6 +88,7 @@ public final class Api {
             String name,
             String aliases,
             BigDecimal shareAmount,
+            String currency,
             boolean owner,
             boolean paid,
             boolean overdue,
@@ -82,7 +96,9 @@ public final class Api {
             LocalDate periodEnd,
             LocalDate paidThrough,
             LocalDate nextBillingDate,
-            int monthsAhead) {
+            int monthsAhead,
+            BigDecimal remainingAmount,
+            int monthsDue) {
     }
 
     public record SubscriptionOut(
@@ -139,13 +155,18 @@ public final class Api {
             LocalDate periodEnd,
             LocalDate paidThrough,
             LocalDate nextBillingDate,
-            int monthsAhead) {
+            int monthsAhead,
+            BigDecimal remainingAmount,
+            int monthsDue) {
     }
 
-    public record PersonOut(Long id, String name, String aliases, boolean hasPin, List<MembershipStatusOut> memberships) {
+    public record PersonOut(Long id, String name, String aliases, boolean hasPin, List<MembershipStatusOut> memberships, String email) {
     }
 
-    public record PinOut(String pin) {
+    public record PinOut(String pin, boolean emailSent) {
+        public PinOut(String pin) {
+            this(pin, false);
+        }
     }
 
     public record InboxMemberOut(Long id, String personName, String subscriptionName, String currency,

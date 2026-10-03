@@ -37,6 +37,10 @@ public class Membership {
     @Column(nullable = false)
     private LocalDateTime createdAt;
 
+    @Column(nullable = true)
+    private LocalDateTime emailReminderSentAt;
+    
+
     @PrePersist
     void onCreate() {
         if (createdAt == null) {
@@ -86,5 +90,13 @@ public class Membership {
 
     public void setCreatedAt(LocalDateTime createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public LocalDateTime getEmailReminderSentAt() {
+        return emailReminderSentAt;
+    }
+
+    public void setEmailReminderSentAt(LocalDateTime emailReminderSentAt) {
+        this.emailReminderSentAt = emailReminderSentAt;
     }
 }

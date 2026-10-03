@@ -2,6 +2,7 @@ package com.splitpay.web;
 
 import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import org.springframework.http.HttpStatus;
@@ -18,6 +19,7 @@ import org.springframework.web.server.ResponseStatusException;
 import com.splitpay.domain.Person;
 import com.splitpay.repo.PersonRepository;
 import com.splitpay.service.LedgerService;
+import com.splitpay.service.NotificationService;
 import com.splitpay.service.PinService;
 import com.splitpay.web.Api.PersonIn;
 import com.splitpay.web.Api.PersonOut;
@@ -36,12 +38,15 @@ public class PeopleController {
     private final LedgerService ledger;
     private final PinService pins;
     private final ViewMapper views;
+    private final NotificationService notifications;
 
-    public PeopleController(PersonRepository people, LedgerService ledger, PinService pins, ViewMapper views) {
+    public PeopleController(PersonRepository people, LedgerService ledger, PinService pins, ViewMapper views,
+            NotificationService notifications) {
         this.people = people;
         this.ledger = ledger;
         this.pins = pins;
         this.views = views;
+        this.notifications = notifications;
     }
 
     @GetMapping
@@ -58,6 +63,7 @@ public class PeopleController {
         Person person = new Person();
         person.setName(name);
         person.setAliases(cleanAliases(in.aliases()));
+        person.setEmail(cleanEmail(in.email()));
         person.setCreatedAt(ledger.now());
         return views.person(people.save(person));
     }
@@ -67,6 +73,7 @@ public class PeopleController {
         Person person = find(id);
         person.setName(in.name().strip());
         person.setAliases(cleanAliases(in.aliases()));
+        person.setEmail(cleanEmail(in.email()));
         return views.person(people.save(person));
     }
 
@@ -80,6 +87,7 @@ public class PeopleController {
     @PostMapping("/{id}/pin")
     PinOut setPin(@PathVariable Long id, @RequestBody(required = false) PinIn in) {
         Person person = find(id);
+        boolean hadPin = person.hasPin();
         String requested = pins.normalize(in == null ? null : in.pin());
         String pin;
         if (requested.isEmpty()) {
@@ -96,7 +104,67 @@ public class PeopleController {
         }
         person.setPinHash(pins.hash(pin));
         people.save(person);
-        return new PinOut(pin);
+
+        boolean emailSent = false;
+        boolean shouldSend = in != null && Boolean.TRUE.equals(in.sendEmail());
+        if (shouldSend && notifications.isConfigured() && person.getEmail() != null && !person.getEmail().isBlank()) {
+            if (hadPin) {
+                emailSent = notifications.sendPasswordResetEmail(person, pin);
+            } else {
+                emailSent = notifications.sendCheckInPasswordEmail(person, pin);
+            }
+        }
+        return new PinOut(pin, emailSent);
+    }
+
+    /** Triggers an automatic unique password reset and emails the new password to the member. */
+    @PostMapping("/{id}/reset-password")
+    PinOut resetPassword(@PathVariable Long id) {
+        Person person = find(id);
+        String pin = generateUnique(person);
+        person.setPinHash(pins.hash(pin));
+        people.save(person);
+
+        boolean emailSent = false;
+        if (notifications.isConfigured() && person.getEmail() != null && !person.getEmail().isBlank()) {
+            emailSent = notifications.sendPasswordResetEmail(person, pin);
+        }
+        return new PinOut(pin, emailSent);
+    }
+
+    /** Triggers check-in password creation and emails the password to the member. */
+    @PostMapping("/{id}/create-pin")
+    PinOut createPin(@PathVariable Long id) {
+        Person person = find(id);
+        String pin = generateUnique(person);
+        person.setPinHash(pins.hash(pin));
+        people.save(person);
+
+        boolean emailSent = false;
+        if (notifications.isConfigured() && person.getEmail() != null && !person.getEmail().isBlank()) {
+            emailSent = notifications.sendCheckInPasswordEmail(person, pin);
+        }
+        return new PinOut(pin, emailSent);
+    }
+
+    /** Sends the member an email with their check-in password. */
+    @PostMapping("/{id}/send-pin-email")
+    Map<String, Object> sendPinEmail(@PathVariable Long id, @RequestBody(required = false) PinIn in) {
+        if (!notifications.isConfigured()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Email notifications are not configured");
+        }
+        Person person = find(id);
+        if (person.getEmail() == null || person.getEmail().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, person.getName() + " does not have an email address");
+        }
+        String pin = in != null ? in.pin() : null;
+        if (pin == null || pin.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Password is required");
+        }
+        boolean sent = person.hasPin()
+                ? notifications.sendPasswordResetEmail(person, pin)
+                : notifications.sendCheckInPasswordEmail(person, pin);
+        return Map.of("ok", true, "sent", sent);
     }
 
     @DeleteMapping("/{id}/pin")
@@ -105,6 +173,44 @@ public class PeopleController {
         person.setPinHash(null);
         people.save(person);
         return Map.of("ok", true);
+    }
+
+    @PostMapping("/{id}/remind")
+    Map<String, Object> sendReminder(@PathVariable Long id) {
+        if (!notifications.isConfigured()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Email notifications are not configured");
+        }
+        Person person = find(id);
+        if (person.getEmail() == null || person.getEmail().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, person.getName() + " does not have an email address");
+        }
+        boolean sent = notifications.sendPaymentReminder(person, true);
+        if (!sent) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, person.getName() + " has no unpaid dues to remind");
+        }
+        return Map.of("ok", true, "sent", true);
+    }
+
+    @PostMapping("/{id}/welcome")
+    Map<String, Object> sendWelcome(@PathVariable Long id) {
+        if (!notifications.isConfigured()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Email notifications are not configured");
+        }
+        Person person = find(id);
+        if (person.getEmail() == null || person.getEmail().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, person.getName() + " does not have an email address");
+        }
+        boolean sent = notifications.sendWelcomeEmail(person, null);
+        return Map.of("ok", true, "sent", sent);
+    }
+
+    @PostMapping("/remind-all")
+    Map<String, Object> remindAll() {
+        if (!notifications.isConfigured()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Email notifications are not configured");
+        }
+        int count = notifications.sendAllOverdueReminders(false);
+        return Map.of("ok", true, "sent_count", count);
     }
 
     private String generateUnique(Person person) {
@@ -131,6 +237,13 @@ public class PeopleController {
                 .map(String::strip)
                 .filter(a -> !a.isEmpty())
                 .toList());
+    }
+
+    private static String cleanEmail(String email) {
+        if (email == null || email.isBlank()) {
+            return null;
+        }
+        return email.strip().toLowerCase(Locale.ROOT);
     }
 
     private Person find(Long id) {

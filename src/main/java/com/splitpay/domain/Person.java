@@ -35,6 +35,9 @@ public class Person {
     @Column(nullable = false)
     private LocalDateTime createdAt;
 
+    @Column(length = 254)
+    private String email;
+
     @OneToMany(mappedBy = "person", cascade = CascadeType.ALL, orphanRemoval = true)
     @OrderBy("id")
     private List<Membership> memberships = new ArrayList<>();
@@ -84,6 +87,14 @@ public class Person {
 
     public void setCreatedAt(LocalDateTime createdAt) {
         this.createdAt = createdAt;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
     }
 
     public List<Membership> getMemberships() {

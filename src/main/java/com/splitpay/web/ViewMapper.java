@@ -41,9 +41,14 @@ public class ViewMapper {
                 .sorted(Comparator.comparing(m -> m.getPerson().getName(), String.CASE_INSENSITIVE_ORDER))
                 .map(this::member)
                 .toList();
-        BigDecimal collected = members.stream()
-                .filter(MemberOut::paid)
-                .map(MemberOut::shareAmount)
+        BigDecimal collected = sub.getMemberships().stream()
+                .map(m -> {
+                    if (m.isOwner()) {
+                        return m.getShareAmount();
+                    }
+                    BigDecimal paid = ledger.periodPaid(m, current);
+                    return paid.min(m.getShareAmount());
+                })
                 .reduce(BigDecimal.ZERO, BigDecimal::add);
         BigDecimal remaining = sub.getTotalAmount().subtract(collected).max(BigDecimal.ZERO);
         List<PaymentOut> recent = withPayments
@@ -58,8 +63,11 @@ public class ViewMapper {
     public MemberOut member(Membership m) {
         MemberStatus s = ledger.status(m);
         Person p = m.getPerson();
-        return new MemberOut(m.getId(), p.getId(), p.getName(), p.getAliases(), m.getShareAmount(), m.isOwner(), s.paid(),
-                s.overdue(), s.periodStart(), s.periodEnd(), s.paidThrough(), s.nextBillingDate(), s.monthsAhead());
+        Subscription sub = m.getSubscription();
+        return new MemberOut(m.getId(), p.getId(), p.getName(), p.getAliases(), m.getShareAmount(),
+                sub != null ? sub.getCurrency() : "EUR", m.isOwner(), s.paid(),
+                s.overdue(), s.periodStart(), s.periodEnd(), s.paidThrough(), s.nextBillingDate(), s.monthsAhead(),
+                s.remainingAmount(), s.monthsDue());
     }
 
     public MembershipStatusOut membershipStatus(Membership m) {
@@ -67,7 +75,7 @@ public class ViewMapper {
         Subscription sub = m.getSubscription();
         return new MembershipStatusOut(m.getId(), sub.getId(), sub.getName(), sub.getCurrency(), m.getShareAmount(),
                 m.isOwner(), s.paid(), s.overdue(), s.periodStart(), s.periodEnd(), s.paidThrough(), s.nextBillingDate(),
-                s.monthsAhead());
+                s.monthsAhead(), s.remainingAmount(), s.monthsDue());
     }
 
     public List<MembershipStatusOut> membershipStatuses(Person person) {
@@ -79,7 +87,7 @@ public class ViewMapper {
 
     public PersonOut person(Person person) {
         return new PersonOut(person.getId(), person.getName(), person.getAliases(), person.hasPin(),
-                membershipStatuses(person));
+                membershipStatuses(person), person.getEmail());
     }
 
     public PaymentOut payment(Payment p) {

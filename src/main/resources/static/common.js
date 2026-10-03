@@ -30,15 +30,39 @@ function fmtDate(iso) {
 
 function statusChip(m) {
   if (m.owner) return `<span class="chip owner">Owner</span>`;
-  if (m.overdue) return `<span class="chip due">Overdue</span>`;
-  if (!m.paid) return `<span class="chip due">Due</span>`;
+  if (m.overdue) {
+    if (m.months_due > 1) {
+      return `<span class="chip due">Overdue · ${m.months_due} mos</span>`;
+    }
+    const rem = m.remaining_amount != null && Number(m.remaining_amount) < Number(m.share_amount)
+      ? ` · ${money(m.remaining_amount, m.currency)} left`
+      : "";
+    return `<span class="chip due">Overdue${rem}</span>`;
+  }
+  if (!m.paid) {
+    if (m.months_due > 1) {
+      return `<span class="chip due">Due · ${m.months_due} mos</span>`;
+    }
+    const rem = m.remaining_amount != null && Number(m.remaining_amount) < Number(m.share_amount)
+      ? ` · ${money(m.remaining_amount, m.currency)} left`
+      : "";
+    return `<span class="chip due">Due${rem}</span>`;
+  }
   return `<span class="chip paid">${m.months_ahead ? `Paid · ${m.months_ahead} ahead` : "Paid"}</span>`;
 }
 
 function statusText(m) {
   if (m.owner) return "Holds the subscription, so their share is always covered";
-  if (m.overdue) return `Overdue since ${fmtDate(m.next_billing_date)}`;
-  if (!m.paid) return `Due since ${fmtDate(m.next_billing_date)}`;
+  const dueDetails = m.remaining_amount != null
+    ? (m.months_due > 1
+        ? ` · ${m.months_due} months (${money(m.remaining_amount, m.currency)}) still due`
+        : ` · ${money(m.remaining_amount, m.currency)} still due`)
+    : (m.months_due > 1 ? ` · ${m.months_due} months still due` : "");
+  if (m.overdue) return `Overdue since ${fmtDate(m.next_billing_date)}${dueDetails}`;
+  if (!m.paid) return `Due since ${fmtDate(m.next_billing_date)}${dueDetails}`;
   const ahead = m.months_ahead ? ` · ${m.months_ahead} month${m.months_ahead === 1 ? "" : "s"} ahead` : "";
-  return `Paid through ${fmtDate(m.paid_through)}${ahead} · next payment ${fmtDate(m.next_billing_date)}`;
+  const nextRem = m.remaining_amount != null && Number(m.remaining_amount) < Number(m.share_amount)
+    ? ` (${money(m.remaining_amount, m.currency)} due)`
+    : "";
+  return `Paid through ${fmtDate(m.paid_through)}${ahead} · next payment ${fmtDate(m.next_billing_date)}${nextRem}`;
 }

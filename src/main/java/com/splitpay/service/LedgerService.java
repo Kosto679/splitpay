@@ -12,8 +12,10 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 
@@ -98,48 +100,147 @@ public class LedgerService {
         YearMonth current = Periods.periodOf(day, today());
         if (membership.isOwner()) {
             return new MemberStatus(true, false, Periods.start(current, day), Periods.end(current, day),
-                    Periods.end(current, day), Periods.start(current.plusMonths(1), day), 0);
+                    Periods.end(current, day), Periods.start(current.plusMonths(1), day), 0, BigDecimal.ZERO, 0);
         }
-        Set<YearMonth> covered = coveredPeriods(membership);
-        YearMonth first = trackingStart(membership, covered);
-        YearMonth open = firstOpen(covered, first);
+        Map<YearMonth, BigDecimal> periodPaid = periodPayments(membership);
+        BigDecimal share = membership.getShareAmount();
+        YearMonth first = trackingStart(membership);
+        YearMonth open = firstOpen(periodPaid, share, first);
         boolean paid = open.isAfter(current);
         LocalDate paidThrough = open.isAfter(first) ? Periods.start(open, day).minusDays(1) : null;
         int ahead = paid ? (int) ChronoUnit.MONTHS.between(current, open) - 1 : 0;
+        int monthsDue = paid ? 0 : (int) ChronoUnit.MONTHS.between(open, current) + 1;
+
+        BigDecimal remainingAmount;
+        if (!paid) {
+            BigDecimal totalDue = BigDecimal.ZERO;
+            YearMonth p = open;
+            while (!p.isAfter(current)) {
+                BigDecimal paidAmount = periodPaid.getOrDefault(p, BigDecimal.ZERO);
+                BigDecimal due = share.subtract(paidAmount).max(BigDecimal.ZERO);
+                totalDue = totalDue.add(due);
+                p = p.plusMonths(1);
+            }
+            remainingAmount = money(totalDue);
+        } else {
+            BigDecimal paidOnOpen = periodPaid.getOrDefault(open, BigDecimal.ZERO);
+            remainingAmount = money(share.subtract(paidOnOpen).max(BigDecimal.ZERO));
+        }
+
         return new MemberStatus(paid, open.isBefore(current), Periods.start(current, day), Periods.end(current, day),
-                paidThrough, Periods.start(open, day), ahead);
+                paidThrough, Periods.start(open, day), ahead, remainingAmount, monthsDue);
     }
 
-    private Set<YearMonth> coveredPeriods(Membership membership) {
-        Set<YearMonth> covered = new HashSet<>();
-        if (membership.getId() == null) {
-            return covered;
+    @Transactional(readOnly = true)
+    public Map<YearMonth, BigDecimal> periodPayments(Membership membership) {
+        Map<YearMonth, BigDecimal> periodPaid = new HashMap<>();
+        if (membership == null || membership.getId() == null) {
+            return periodPaid;
         }
-        for (Payment payment : payments.findByMembershipIdAndStatus(membership.getId(), PaymentStatus.MATCHED)) {
-            if (payment.getPeriodStart() == null) {
+        BigDecimal share = membership.getShareAmount();
+        if (share == null || share.signum() <= 0) {
+            return periodPaid;
+        }
+        List<Payment> matched = payments.findByMembershipIdAndStatus(membership.getId(), PaymentStatus.MATCHED).stream()
+                .sorted(Comparator.comparing(Payment::getPaidAt, Comparator.nullsLast(Comparator.naturalOrder()))
+                        .thenComparing(Payment::getId, Comparator.nullsLast(Comparator.naturalOrder())))
+                .toList();
+
+        YearMonth trackingStart = trackingStart(membership);
+
+        for (Payment payment : matched) {
+            if (payment.getAmount() == null || payment.getAmount().signum() <= 0) {
                 continue;
             }
-            YearMonth start = YearMonth.from(payment.getPeriodStart());
-            for (int i = 0; i < Math.max(1, payment.getPeriods()); i++) {
-                covered.add(start.plusMonths(i));
+            YearMonth period = payment.getPeriodStart() != null
+                    ? YearMonth.from(payment.getPeriodStart())
+                    : firstOpen(periodPaid, share, trackingStart);
+            BigDecimal unallocated = payment.getAmount();
+            int iterations = 0;
+            while (unallocated.compareTo(new BigDecimal("0.005")) > 0 && iterations++ < 240) {
+                BigDecimal alreadyPaid = periodPaid.getOrDefault(period, BigDecimal.ZERO);
+                BigDecimal needed = share.subtract(alreadyPaid);
+                if (needed.compareTo(BigDecimal.ZERO) <= 0) {
+                    period = period.plusMonths(1);
+                    continue;
+                }
+                BigDecimal contribute = unallocated.min(needed);
+                periodPaid.put(period, money(alreadyPaid.add(contribute)));
+                unallocated = unallocated.subtract(contribute);
+                if (unallocated.compareTo(new BigDecimal("0.005")) > 0) {
+                    period = period.plusMonths(1);
+                }
             }
         }
-        return covered;
+        return periodPaid;
+    }
+
+    @Transactional(readOnly = true)
+    public BigDecimal periodPaid(Membership membership, YearMonth period) {
+        if (membership == null || membership.isOwner()) {
+            return membership != null ? membership.getShareAmount() : BigDecimal.ZERO;
+        }
+        return periodPayments(membership).getOrDefault(period, BigDecimal.ZERO);
     }
 
     /** Earliest period the person owes: when they joined, or earlier if a payment was booked before that. */
-    private YearMonth trackingStart(Membership membership, Set<YearMonth> covered) {
-        YearMonth joined = Periods.periodOf(membership.getSubscription().getBillingDay(),
-                membership.getCreatedAt().toLocalDate());
-        return covered.stream().min(Comparator.naturalOrder()).filter(p -> p.isBefore(joined)).orElse(joined);
+    YearMonth trackingStart(Membership membership) {
+        int day = membership.getSubscription() != null ? membership.getSubscription().getBillingDay() : 1;
+        LocalDate joinDate = membership.getCreatedAt() != null ? membership.getCreatedAt().toLocalDate() : today();
+        YearMonth joined = Periods.periodOf(day, joinDate);
+        if (membership.getId() == null) {
+            return joined;
+        }
+        return payments.findByMembershipIdAndStatus(membership.getId(), PaymentStatus.MATCHED).stream()
+                .filter(p -> p.getPeriodStart() != null)
+                .map(p -> YearMonth.from(p.getPeriodStart()))
+                .min(Comparator.naturalOrder())
+                .filter(p -> p.isBefore(joined))
+                .orElse(joined);
     }
 
-    private static YearMonth firstOpen(Set<YearMonth> covered, YearMonth from) {
+    public YearMonth firstOpen(Map<YearMonth, BigDecimal> periodPaid, BigDecimal share, YearMonth from) {
         YearMonth period = from;
-        while (covered.contains(period)) {
+        int count = 0;
+        while (isFullyCovered(periodPaid.get(period), share) && count++ < 240) {
             period = period.plusMonths(1);
         }
         return period;
+    }
+
+    private static boolean isFullyCovered(BigDecimal paid, BigDecimal share) {
+        if (paid == null) {
+            return false;
+        }
+        return paid.add(TOLERANCE).compareTo(share) >= 0;
+    }
+
+    public int calculatePeriods(BigDecimal amount, Membership membership, YearMonth firstPeriod) {
+        if (amount == null || amount.signum() <= 0 || membership == null) {
+            return 1;
+        }
+        BigDecimal share = membership.getShareAmount();
+        if (share == null || share.signum() <= 0) {
+            return 1;
+        }
+        Map<YearMonth, BigDecimal> periodPaid = periodPayments(membership);
+        YearMonth period = firstPeriod != null ? firstPeriod : firstOpen(periodPaid, share, trackingStart(membership));
+        BigDecimal unallocated = amount;
+        int periodsTouched = 0;
+        int iterations = 0;
+        while (unallocated.compareTo(new BigDecimal("0.005")) > 0 && iterations++ < MAX_PERIODS) {
+            periodsTouched++;
+            BigDecimal alreadyPaid = periodPaid.getOrDefault(period, BigDecimal.ZERO);
+            BigDecimal needed = share.subtract(alreadyPaid);
+            if (needed.compareTo(BigDecimal.ZERO) <= 0) {
+                period = period.plusMonths(1);
+                continue;
+            }
+            BigDecimal contribute = unallocated.min(needed);
+            unallocated = unallocated.subtract(contribute);
+            period = period.plusMonths(1);
+        }
+        return Math.clamp(Math.max(1, periodsTouched), 1, MAX_PERIODS);
     }
 
     public Optional<Integer> periodsFor(BigDecimal amount, BigDecimal share, int max) {
@@ -188,9 +289,6 @@ public class LedgerService {
         long distinctPeople = named.stream().map(m -> m.getPerson().getId()).distinct().count();
         if (distinctPeople != 1) {
             return List.of();
-        }
-        if (named.size() == 1) {
-            return named;
         }
         BigDecimal total = named.stream().map(Membership::getShareAmount).reduce(BigDecimal.ZERO, BigDecimal::add);
         return close(amount, total) ? named : List.of();
@@ -263,7 +361,8 @@ public class LedgerService {
     /** Credits a payment to a membership. With no first period, it fills the earliest unpaid one. */
     public Payment recordFor(Membership membership, PaymentDraft draft, int periods, YearMonth firstPeriod) {
         Payment payment = newPayment(draft);
-        credit(payment, membership, periods, firstPeriod);
+        int count = periods > 0 ? periods : calculatePeriods(draft.amount(), membership, firstPeriod);
+        credit(payment, membership, count, firstPeriod);
         return payments.save(payment);
     }
 
@@ -272,16 +371,17 @@ public class LedgerService {
         payment.setMembership(null);
         payments.saveAndFlush(payment);
         int count = periods != null
-                ? periods
-                : periodsFor(payment.getAmount(), membership.getShareAmount(), MAX_PERIODS).orElse(1);
+                ? Math.clamp(periods, 1, MAX_PERIODS)
+                : calculatePeriods(payment.getAmount(), membership, null);
         credit(payment, membership, count, null);
         return payments.save(payment);
     }
 
     private void credit(Payment payment, Membership membership, int periods, YearMonth firstPeriod) {
         int day = membership.getSubscription().getBillingDay();
-        Set<YearMonth> covered = coveredPeriods(membership);
-        YearMonth start = firstPeriod != null ? firstPeriod : firstOpen(covered, trackingStart(membership, covered));
+        Map<YearMonth, BigDecimal> periodPaid = periodPayments(membership);
+        YearMonth start = firstPeriod != null ? firstPeriod
+                : firstOpen(periodPaid, membership.getShareAmount(), trackingStart(membership));
         payment.setMembership(membership);
         payment.setSubscription(membership.getSubscription());
         payment.setPeriodStart(Periods.start(start, day));
@@ -314,11 +414,15 @@ public class LedgerService {
     }
 
     public Membership addMembership(Subscription subscription, Person person, BigDecimal share, boolean owner) {
+        return addMembership(subscription, person, share, owner, now());
+    }
+
+    public Membership addMembership(Subscription subscription, Person person, BigDecimal share, boolean owner, LocalDateTime startAt) {
         Membership membership = new Membership();
         membership.setSubscription(subscription);
         membership.setPerson(person);
         membership.setShareAmount(money(share));
-        membership.setCreatedAt(now());
+        membership.setCreatedAt(startAt != null ? startAt : now());
         subscription.getMemberships().add(membership);
         person.getMemberships().add(membership);
         Membership saved = memberships.save(membership);

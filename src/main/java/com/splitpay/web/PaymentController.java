@@ -85,7 +85,7 @@ public class PaymentController {
             BigDecimal given = in.amount() != null ? in.amount() : notice == null ? null : notice.amount();
             int periods = in.periods() != null
                     ? Math.clamp(in.periods(), 1, LedgerService.MAX_PERIODS)
-                    : given == null ? 1 : ledger.periodsFor(given, share, LedgerService.MAX_PERIODS).orElse(1);
+                    : given == null ? 1 : ledger.calculatePeriods(given, membership, firstPeriod(in.firstPeriod()));
             BigDecimal amount = given != null ? given : share.multiply(BigDecimal.valueOf(periods));
             String currency = currencyOr(in.currency(), membership.getSubscription().getCurrency());
             PaymentDraft draft = new PaymentDraft(amount, currency, ledger.resolvePaidAt(in.paidAt()), source,

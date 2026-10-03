@@ -1,5 +1,8 @@
 package com.splitpay.web;
 
+import java.time.LocalDateTime;
+import java.time.YearMonth;
+import java.time.format.DateTimeParseException;
 import java.util.Locale;
 import java.util.Map;
 
@@ -93,8 +96,21 @@ public class SubscriptionController {
         if (person.getId() != null && memberships.existsBySubscriptionIdAndPersonId(sub.getId(), person.getId())) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, person.getName() + " is already on " + sub.getName());
         }
-        ledger.addMembership(sub, person, in.shareAmount(), Boolean.TRUE.equals(in.owner()));
+        LocalDateTime startAt = parseFirstPeriod(in.firstPeriod(), sub.getBillingDay());
+        ledger.addMembership(sub, person, in.shareAmount(), Boolean.TRUE.equals(in.owner()), startAt);
         return views.subscription(sub, true);
+    }
+
+    private static LocalDateTime parseFirstPeriod(String value, int billingDay) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            YearMonth ym = YearMonth.parse(value.strip());
+            return Periods.start(ym, billingDay).atStartOfDay();
+        } catch (DateTimeParseException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "First month must look like 2026-10");
+        }
     }
 
     @PostMapping("/members/{id}/owner")
